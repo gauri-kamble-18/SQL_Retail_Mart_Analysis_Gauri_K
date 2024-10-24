@@ -1,8 +1,7 @@
 -- ADVANCE ASSIGNMENTS
 -- Indexes
 USE db_retail_mart;
-SELECT * FROM tbl_campaign;
-SELECT * FROM tbl_orders;
+
 CREATE INDEX idx_campaign_budget ON tbl_campaign(budget);
 -- Reason:This index will speed up queries that involve filtering or sorting campaigns based on their budget, such as selecting campaigns with the highest and lowest budgets.
 
@@ -29,53 +28,34 @@ CREATE INDEX idx_campaign_region ON tbl_campaign(region);
 
 
 -- 1)Select the campaigns with the highest and lowest budgets.
-CREATE INDEX idx_campaign_budget ON tbl_campaign(budget);
-
-SELECT campaign_id,campaign_name,budget FROM tbl_campaign ORDER BY budget DESC LIMIT 1;
-SELECT campaign_id, campaign_name,budget FROM tbl_campaign ORDER BY budget ASC LIMIT 1;
-(
+--    - Find the highest and lowest budgets.
+--    - Use RANK() to assign rankings.
+WITH ranked_campaigns AS (
     SELECT 
-        campaign_id, 
-        campaign_name, 
-        budget, 
-        'Highest Budget' AS budget_type
-    FROM 
-        tbl_campaign 
-    ORDER BY 
-        budget DESC 
-    LIMIT 1
-)
-
-UNION ALL
-
-(
-    SELECT 
-        campaign_id, 
-        campaign_name, 
-        budget, 
-        'Lowest Budget' AS budget_type
-    FROM 
-        tbl_campaign 
-    ORDER BY 
-        budget ASC 
-    LIMIT 1
-);
-SELECT 
-    MAX(CASE WHEN budget = highest_budget THEN campaign_name END) AS highest_budget_campaign,
-    MAX(CASE WHEN budget = lowest_budget THEN campaign_name END) AS lowest_budget_campaign,
-    highest_budget,
-    lowest_budget
-FROM (
-    SELECT 
+        campaign_id,
         campaign_name,
         budget,
-        (SELECT MAX(budget) FROM tbl_campaign) AS highest_budget,
-        (SELECT MIN(budget) FROM tbl_campaign) AS lowest_budget
+        RANK() OVER (ORDER BY budget DESC) AS budget_rank_high,
+        RANK() OVER (ORDER BY budget ASC) AS budget_rank_low
     FROM 
         tbl_campaign
-) AS budget_info;
+)
+SELECT 
+    campaign_id,
+    campaign_name,
+    budget,
+    CASE 
+        WHEN budget_rank_high = 1 THEN 'Highest'
+        WHEN budget_rank_low = 1 THEN 'Lowest'
+    END AS budget_type
+FROM 
+    ranked_campaigns
+WHERE 
+    budget_rank_high = 1 OR budget_rank_low = 1;
 
 -- 2)Find the average price of products across all categories.
+--    - Group products by category.
+--    - Use AVG() to calculate the average price for each category.
 SELECT 
     category,
     AVG(price) AS average_price
@@ -85,14 +65,50 @@ GROUP BY
     category;
 
 -- 3)Rank products based on their total sales within each category.
+--    - Join products with order items to calculate total sales per product.
+--    - Use DENSE_RANK() to assign rankings within each category.
+
+WITH product_sales AS (
+    -- Step 1: Calculate total sales for each product in each category
+    SELECT 
+        p.product_id,
+        p.product_name,
+        p.category,
+        SUM(oi.quantity * oi.price) AS total_sales
+    FROM 
+        tbl_products p
+    JOIN 
+        tbl_order_items oi ON p.product_id = oi.product_id
+    GROUP BY 
+        p.product_id, p.product_name, p.category
+),
+ranked_products AS (
+    -- Step 2: Rank products within each category based on total sales
+    SELECT 
+        product_id,
+        product_name,
+        category,
+        total_sales,
+        DENSE_RANK() OVER (PARTITION BY category ORDER BY total_sales DESC) AS sales_rank
+    FROM 
+        product_sales
+)
+
+-- Step 3: Select the final output
 SELECT 
-	p.product_id,p.product_name, p.category,SUM(oi.quantity*oi.price) AS total_sales,
-    RANK() OVER(PARTITION BY p.category ORDER BY SUM(oi.quantity*oi.price) DESC) AS productrank_over_the_total_sales_within_each_category
-    FROM tbl_products p JOIN tbl_order_items oi ON p.product_id=oi.product_id 
-    GROUP BY p.category,p.product_id,p.product_name 
-    ORDER BY total_sales DESC;
+    product_id,
+    product_name,
+    category,
+    total_sales,
+    sales_rank
+FROM 
+    ranked_products
+ORDER BY 
+    category, sales_rank;
 
 -- 4)Create a CTE to calculate the total revenue and average order amount for each campaign.
+--    - Use SUM() to calculate total revenue for each campaign.
+--    - Use AVG() to calculate the average order amount per campaign.
 WITH CampaignRevenue AS (
     SELECT 
         o.campaign_id,
@@ -115,33 +131,42 @@ JOIN
     CampaignRevenue cr ON c.campaign_id = cr.campaign_id;
 
 -- 5)Handle any missing stock quantities and provide a default value of 0 for products with no recorded inventory.
-SELECT * FROM tbl_inventory;
-SELECT
-	p.product_id,p.product_name,p.category,
+--    - Join products with inventory data.
+--    - Use COALESCE() to replace missing stock quantities with 0.
+    
+SELECT 
+    p.product_id,
+    p.product_name,
+    p.category,
     COALESCE(i.stock_quantity, 0) AS stock_quantity
 FROM 
-	tbl_products p 
-JOIN 
-	tbl_inventory i 
-ON 
-	p.product_id=i.product_id;
+    tbl_products p
+LEFT JOIN 
+    tbl_inventory i ON p.product_id = i.product_id
+ORDER BY 
+    p.product_id;
 
 
 -- 6)Analyse the total quantity and revenue generated from each product by customer.
-SELECT SUM(oi.quantity) AS total_quantity, SUM(oi.quantity*oi.price) AS revenue_generated,oi.product_id,c.customer_id
+--    - Join customers, orders, order items, and products.
+--    - Use SUM() to calculate total quantity and total revenue for each product per customer.
+SELECT c.name AS customer_name, p.product_name,
+       SUM(oi.quantity) AS total_quantity,
+       SUM(oi.quantity * oi.price) AS total_revenue
 FROM 
-	tbl_order_items oi
-JOIN
-	tbl_orders o
-ON
-	oi.order_id=o.order_id
-JOIN
-	tbl_customers c
-ON o.customer_id=c.customer_id
-GROUP BY c.customer_id,oi.product_id
-ORDER BY c.customer_id, revenue_generated DESC;
+    tbl_customers c
+JOIN 
+    tbl_orders o ON c.customer_id = o.customer_id
+JOIN 
+    tbl_order_items oi ON o.order_id = oi.order_id
+JOIN 
+    tbl_products p ON oi.product_id = p.product_id
+GROUP BY 
+    c.name, p.product_name;
 
 -- 7)Find campaigns that have a higher average order amount than the overall average.
+--    - Group orders by campaign and calculate the average order amount.
+--    - Use HAVING to filter campaigns where the average order amount exceeds the overall average.
 SELECT c.campaign_id, c.campaign_name, AVG(o.total_amount) AS avg_order_amount
 FROM
 	tbl_campaign c
@@ -153,35 +178,79 @@ GROUP BY
 HAVING
 	AVG(o.total_amount) > (SELECT AVG(total_amount) FROM tbl_orders);
     
+
 -- 8)Analyse the rolling average of sales per campaign over the last 3 months.
+--    - Use SUM() to calculate total sales per month for each campaign.
+--    - Use a window function to calculate the rolling average sales over the last 3 months.
+WITH monthly_sales AS (
+    SELECT 
+        campaign_id,
+        DATE_FORMAT(order_date, '%Y-%m-01') AS sales_month,  -- Truncate to month
+        SUM(total_amount) AS total_sales
+    FROM 
+        tbl_orders
+    WHERE 
+        order_date >= CURRENT_DATE - INTERVAL 3 MONTH
+    GROUP BY 
+        campaign_id, sales_month
+),
+rolling_avg_sales AS (
+    SELECT 
+        campaign_id,
+        sales_month,
+        AVG(total_sales) OVER (PARTITION BY campaign_id ORDER BY sales_month 
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS rolling_average_sales
+    FROM 
+        monthly_sales
+)
 SELECT 
-    campaign_id, 
-    order_date, 
-    AVG(total_amount) OVER (PARTITION BY campaign_id ORDER BY order_date) AS rolling_average_sales
+    campaign_id,
+    sales_month,
+    rolling_average_sales,
+    DATE_FORMAT(sales_month, '%M') AS month_name  -- Format month name
 FROM 
-    tbl_orders
-WHERE 
-    order_date >= CURDATE() - INTERVAL 3 MONTH;
-    
+    rolling_avg_sales
+ORDER BY 
+    campaign_id, sales_month;
 
     
 -- 9)Calculate the growth rate of sales for each campaign over time and rank them accordingly
+--    - Use LAG() to calculate the previous month's sales for each campaign.
+--    - Use RANK() to rank campaigns based on sales growth.
+USE db_retail_mart;
+WITH sales_per_month AS (
+    SELECT 
+        c.campaign_name,
+        DATE_FORMAT(o.order_date, '%Y-%m') AS month,
+        SUM(o.total_amount) AS total_sales
+    FROM tbl_orders o
+    JOIN tbl_campaign c ON o.campaign_id = c.campaign_id
+    GROUP BY c.campaign_name, DATE_FORMAT(o.order_date, '%Y-%m')
+),
+sales_growth AS (
+    SELECT 
+        campaign_name,
+        month,
+        total_sales,
+        LAG(total_sales) OVER (PARTITION BY campaign_name ORDER BY month) AS previous_sales,
+        (total_sales - LAG(total_sales) OVER (PARTITION BY campaign_name ORDER BY month)) / 
+        LAG(total_sales) OVER (PARTITION BY campaign_name ORDER BY month) * 100 AS growth_rate
+    FROM sales_per_month
+)
 SELECT 
-    c.campaign_name,
-    o.order_date,
-    SUM(o.total_amount) AS total_sales,
-    ((SUM(o.total_amount) - LAG(SUM(o.total_amount)) OVER (ORDER BY o.order_date)) /
-     NULLIF(LAG(SUM(o.total_amount)) OVER (ORDER BY o.order_date), 0) * 100) AS growth_rate
-FROM 
-    tbl_campaign c
-INNER JOIN 
-    tbl_orders o ON c.campaign_id = o.campaign_id
-GROUP BY 
-    c.campaign_name, o.order_date
-ORDER BY 
-    o.order_date;
+    campaign_name,
+    month,
+    total_sales,
+    growth_rate,
+    RANK() OVER (ORDER BY growth_rate DESC) AS growth_rank
+FROM sales_growth
+WHERE growth_rate IS NOT NULL
+ORDER BY growth_rank;
+
     
 -- 10)Use CTEs and Window Functions to find the top 5 customers who have consistently spent above the 75th percentile of customer spending.
+--    - Calculate the 75th percentile of total spending using a window function.
+--    - Filter customers whose total spending is above the 75th percentile.
 WITH Percentile AS (
     SELECT 
         total_spent,
@@ -212,6 +281,48 @@ LIMIT 5;
 
 
 -- 11)Use Advanced Sub-Queries to find the correlation between campaign budgets and total revenue generated.
+--    - Join campaigns with orders to aggregate total sales per region.
+--    - Group results by region.
+WITH campaign_revenue AS (
+    -- Step 1: Calculate total revenue for each campaign
+    SELECT 
+        c.campaign_id,
+        c.campaign_name,
+        c.budget,
+        SUM(o.total_amount) AS total_revenue
+    FROM 
+        tbl_campaign c
+    JOIN 
+        tbl_orders o ON c.campaign_id = o.campaign_id
+    GROUP BY 
+        c.campaign_id, c.campaign_name, c.budget
+),
+budget_ranges AS (
+    -- Step 2: Define budget ranges
+    SELECT 
+        campaign_id,
+        campaign_name,
+        budget,
+        total_revenue,
+        CASE
+            WHEN budget BETWEEN 0 AND 10000 THEN '0-10K'
+            WHEN budget BETWEEN 10001 AND 20000 THEN '10K-20K'
+            WHEN budget BETWEEN 20001 AND 30000 THEN '20K-30K'
+            WHEN budget BETWEEN 30001 AND 50000 THEN '30K-50K'
+            ELSE '50K+'
+        END AS budget_range
+    FROM 
+        campaign_revenue
+)
+-- Step 3: Select data grouped by budget range
+SELECT 
+    budget_range,
+    JSON_OBJECTAGG(campaign_name, total_revenue) AS campaigns_revenue_dict
+FROM 
+    budget_ranges
+GROUP BY 
+    budget_range;
+-- option 2
 SELECT 
     c.campaign_id,
     c.campaign_name,
@@ -225,38 +336,35 @@ GROUP BY
     c.campaign_id, c.campaign_name, c.budget;
     
 -- 12)Partition the sales data to compare the performance of different regions and identify any anomalies.
-WITH TotalSalesByRegion AS (
-    SELECT 
-        c.region,
-        SUM(o.total_amount) AS total_sales
-    FROM 
-        tbl_campaign c
-    JOIN 
-        tbl_orders o ON c.campaign_id = o.campaign_id
-    GROUP BY 
-        c.region
-),
-AverageSales AS (
-    SELECT 
-        AVG(total_sales) AS avg_sales
-    FROM 
-        TotalSalesByRegion
-)
-
-SELECT 
-    ts.region,
-    ts.total_sales,
-    CASE 
-        WHEN ts.total_sales < (SELECT avg_sales FROM AverageSales) * 0.8 THEN 'Anomaly: Low Sales'
-        WHEN ts.total_sales > (SELECT avg_sales FROM AverageSales) * 1.2 THEN 'Anomaly: High Sales'
-        ELSE 'Normal'
-    END AS sales_status
+--    - Use DENSE_RANK() to rank the regions based on average sales.
+--    - Partition the data by region to compare performance across regions.
+SELECT region, AVG(total_amount) AS avg_sales,
+      DENSE_RANK() OVER (ORDER BY AVG(total_amount) DESC) AS sales_rank
 FROM 
-    TotalSalesByRegion ts
-ORDER BY 
-    ts.total_sales DESC;
+    tbl_campaign c
+JOIN 
+    tbl_orders o ON c.campaign_id = o.campaign_id
+GROUP BY 
+    region;
     
 -- 13)Analyse the impact of product categories on campaign success.
+--    - Summarize the total revenue and total orders for each product category.
+--    - Join products, order items, orders, and campaigns to link categories with campaign success metrics.
+SELECT p.category, SUM(o.total_amount) AS total_revenue,
+       COUNT(o.order_id) AS total_orders
+FROM 
+    tbl_products p
+JOIN 
+    tbl_order_items oi ON p.product_id = oi.product_id
+JOIN 
+    tbl_orders o ON oi.order_id = o.order_id
+JOIN 
+    tbl_campaign c ON o.campaign_id = c.campaign_id
+GROUP BY 
+    p.category;
+    
+-- option 2
+    
 WITH CampaignRevenue AS (
     SELECT 
         c.campaign_id,
@@ -288,86 +396,57 @@ ORDER BY
     total_revenue DESC;
     
 -- 14)Compute the moving average of sales per region and analyze trends.
+--    - Calculate a moving average of sales for each region over time using a window function.
+--    - Partition by region to observe trends in sales over time.
 SELECT 	c.region,o.order_date,
 	AVG(o.total_amount) OVER (PARTITION BY c.region ORDER BY o.order_date
-ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS moving_avg_sales
+ROWS BETWEEN UNBOUNDED PRECEDING AND current row) AS moving_avg_sales
 FROM tbl_campaign c
 JOIN tbl_orders o ON c.campaign_id = o.campaign_id;
     
 -- 15)Evaluate the effectiveness of campaigns by comparing the pre-campaign and post-campaign average sales.
-WITH campaign_sales AS (
+--    - Use CASE to distinguish between pre-campaign and post-campaign sales.
+--    - Calculate average sales for both pre and post-campaign periods.
+--    - Compute the difference in average sales and the percentage change to assess campaign effectiveness.
+WITH sales_data AS (
     SELECT 
         c.campaign_id,
         c.campaign_name,
-        o.order_date,
-        o.total_amount,
-        CASE
-            WHEN o.order_date < c.start_date THEN 'Pre-Campaign'
-            WHEN o.order_date > c.end_date THEN 'Post-Campaign'
-            ELSE 'During Campaign'
-        END AS campaign_phase
+        CASE 
+            WHEN o.order_date < c.start_date THEN 'Pre Campaign'
+            WHEN o.order_date > c.end_date THEN 'Post Campaign'
+        END AS duration,
+        o.total_amount
     FROM 
         tbl_campaign c
-    JOIN 
+    INNER JOIN 
         tbl_orders o ON c.campaign_id = o.campaign_id
+    WHERE 
+        o.order_date < c.start_date OR o.order_date > c.end_date
+),
+average_sales AS (
+    SELECT 
+        campaign_id,
+        campaign_name,
+        AVG(CASE WHEN duration = 'Pre Campaign' THEN total_amount END) AS avg_pre_sales,
+        AVG(CASE WHEN duration = 'Post Campaign' THEN total_amount END) AS avg_post_sales
+    FROM 
+        sales_data
+    GROUP BY 
+        campaign_id, campaign_name
 )
-
 SELECT 
     campaign_id,
     campaign_name,
-    AVG(CASE WHEN campaign_phase = 'Pre-Campaign' THEN total_amount END) AS avg_pre_campaign_sales,
-    AVG(CASE WHEN campaign_phase = 'Post-Campaign' THEN total_amount END) AS avg_post_campaign_sales
+    COALESCE(avg_pre_sales, 0) AS avg_pre_sales,  -
+    COALESCE(avg_post_sales, 0) AS avg_post_sales,  
+    (COALESCE(avg_post_sales, 0) - COALESCE(avg_pre_sales, 0)) AS sales_difference,
+    CASE 
+        WHEN COALESCE(avg_pre_sales, 0) = 0 THEN NULL  
+        ELSE (COALESCE(avg_post_sales, 0) - COALESCE(avg_pre_sales, 0)) / COALESCE(avg_pre_sales, 0) * 100 
+    END AS effectiveness_percentage
 FROM 
-    campaign_sales
-WHERE 
-    campaign_phase IN ('Pre-Campaign', 'Post-Campaign')
-GROUP BY 
-    campaign_id, campaign_name
-ORDER BY 
-    campaign_id;
-    
-WITH sales_data AS (
-	SELECT
-		c.campaign_id,
-        c.campaign_name,
-        CASE
-			WHEN o.order_date < c.start_date THEN 'Pre-Campaign'
-            WHEN o.order_date > c.end_date THEN 'Post-Campaign'
-		END AS duration,
-        o.total_amount
-	FROM
-		tbl_campaign c
-	INNER JOIN 
-		tbl_orders o ON c.campaign_id = o.campaign_id
-	WHERE
-		(o.order_date < c.start_date OR o.order_date > c.end_date)
-),
-average_sales AS (
-	SELECT
-		campaign_id,
-        campaign_name,
-        AVG(CASE WHEN duration = 'Pre-Campaign' THEN total_amount END) AS avg_pre_sales,
-        AVG(CASE WHEN duration = 'Post-Campaign' THEN total_amount END) AS avg_post_sales
-	FROM
-		sales_data
-	GROUP BY 
-		campaign_id,campaign_name
-)
-SELECT
-	campaign_id,
-    campaign_name,
-    avg_pre_sales,
-    avg_post_sales,
-    (avg_post_sales - avg_pre_sales) AS sales_difference,
-    CASE
-		WHEN avg_pre_sales = 0 THEN NULL 
-        ELSE (avg_post_sales - avg_pre_sales) / avg_pre_sales * 100
-	END AS effectiveness_percentage
-FROM 
-	average_sales;
+    average_sales;
         
     
         
-
-
-
